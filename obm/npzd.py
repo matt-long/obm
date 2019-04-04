@@ -1,10 +1,7 @@
 import numpy as np
-import xarray as xr
-from scipy.optimize import fsolve
 
 from .box_model_base import box_model
 from .transfer_functions import michaelis_menten, arrhenius
-
 
 
 class simple_npd(box_model):
@@ -30,7 +27,6 @@ class simple_npd(box_model):
                      'Tref_P': 15.,
                      'Tref_Z': 15.}
 
-
         tau_vert_flux = kwargs.pop('tau_bio_day', 0.5)
         h_surf = kwargs.pop('h_surf', 100.)
         state_deep = kwargs.pop('state_init', None)
@@ -47,32 +43,14 @@ class simple_npd(box_model):
 
         #self.dt = 3600. * 2.
         self.boxes = ['surface']
-
         self.tracers = ['N', 'P', 'Z']
-        self.ind = {tracer: int(i) for i, tracer in enumerate(self.tracers)}
-
-        nboxes = len(self.boxes)
-        ntracers = len(self.tracers)
-        self._allocate_state(nboxes, ntracers)
-
-
-    def _init(self, state_init, init_option='equilibrium', **kwargs):
-        """Initialize the model."""
-        if state_init is None:
-            state_init = np.ones(self.state.shape)
-
-        if init_option == 'equilibrium':
-            return self._fsolve_equilibrium(state_init, **kwargs)
-        else:
-            raise ValueError('unknown init option')
+        self._allocate_state()
 
     def compute_tendencies(self, t, state):
 
-        ind = self.ind
-
-        N = self.ind['N']
-        P = self.ind['P']
-        Z = self.ind['Z']
+        N = state[:, self.ind['N']]
+        P = state[:, self.ind['P']]
+        Z = state[:, self.ind['Z']]
 
         mu_max = self.mu_max
         K_N = self.K_N
@@ -90,24 +68,25 @@ class simple_npd(box_model):
         Ea_P = self.Ea_P
         Ea_Z = self.Ea_Z
 
-        G = michaelis_menten(state[:, P], K_P)
-        L_N = michaelis_menten(state[:, N], K_N)
+        G = michaelis_menten(P, K_P)
+        L_N = michaelis_menten(N, K_N)
         L_T_P = arrhenius(self.forcing_t.TEMP.values, Ea=Ea_P, Tref=Tref_P)
         L_I = 1.
 
         L_T_Z = arrhenius(self.forcing_t.TEMP.values, Ea=Ea_Z, Tref=Tref_Z)
 
-        growth = mu_max * L_N * L_T_P * state[:, P]
-        graze = g_max * G * L_T_Z * state[:, Z]
-        mortality_P = m_P * state[:, P] + m_PP * state[:, P] ** 2.
-        mortality_Z = m_Z * state[:, Z] + m_ZZ * state[:, Z] ** 2.
+        growth = mu_max * L_N * L_T_P * P
+        graze = g_max * G * L_T_Z * Z
+        mortality_P = m_P * P + m_PP * P ** 2.
+        mortality_Z = m_Z * Z + m_ZZ * Z ** 2.
 
         self.dcdt[:, P] = growth - graze - mortality_P
         self.dcdt[:, Z] = gamma * graze - mortality_Z
-        self.dcdt[:, N] = (-1.0) * growth + (1. - gamma) * graze + mortality_P + mortality_Z
+        self.dcdt[:, N] = (-1.0) * growth + (1. - gamma) * \
+            graze + mortality_P + mortality_Z
 
         # check conservation
         np.testing.assert_allclose(self.dcdt.sum(axis=1), 0., atol=1e-7,
                                    rtol=1e-7)
 
-        return self.dcdt, self.diag
+        return self.dcdt, self.diag_values
