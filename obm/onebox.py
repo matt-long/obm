@@ -130,7 +130,7 @@ class surface_mixed_layer(box_model):
 
         # mol/m^2/yr --> mmol/m^2/s
         NCP_dic = self.forcing_t['NCP'].values * 1e3 / self.const.spy
-        NCP_o2 = (-1.0) * self.parm.ratio_O22C * NCP_dic
+        NCP_o2 = self.parm.ratio_O22C * NCP_dic
 
         # update carbonate system
         co2aq, hco3, co3 = co2calc.co2sys_from_dic_alk(S=SALT, T=TEMP,
