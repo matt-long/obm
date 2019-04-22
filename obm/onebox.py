@@ -47,10 +47,15 @@ class surface_mixed_layer(box_model):
         diag_list = ['pCO2', 'stf_CO2', 'stf_O2', 'O2sat', 'restore_DIC']
 
         self.diag_values = {k: None for k in diag_list}
+        self.diag_values.update({k: None for k in self.forcing.data_vars})
 
         self.diag_definitions = {}
         for v in diag_list:
             self.diag_definitions[v] = {'dims': ('time',)}
+
+        for v in self.forcing.data_vars:
+            self.diag_definitions[v] = {'dims': ('time',)}
+            self.diag_definitions[v]['attrs'] = self.forcing[v].attrs
 
         self.diag_definitions['pCO2']['attrs'] = {'long_name': 'pCO$_2$',
                                                   'units': 'ppm'}
@@ -111,25 +116,27 @@ class surface_mixed_layer(box_model):
 
         return forcing
 
-    def compute_tendencies(self, t, state):
+    def compute_tendencies(self, t, state, return_diags=False):
 
         # local variables
         ind = self.ind
-        DIC = state[:, ind['DIC']]
-        O2 = state[:, ind['O2']]
+        DIC = state[ind['DIC']]
+        O2 = state[ind['O2']]
 
         # local forcing variables
-        ALK = self.forcing_t['ALK'].values
-        TEMP = self.forcing_t['TEMP'].values
-        SALT = self.forcing_t['SALT'].values
-        ICE_FRAC = self.forcing_t['ICE_FRAC'].values
-        U10 = self.forcing_t['U10'].values
-        Patm = self.forcing_t['Patm'].values
-        Xco2atm = self.forcing_t['XCO2atm'].values
-        h = self.forcing_t['h'].values
+        forcing_t = self.interp_forcing(t)
+
+        ALK = forcing_t['ALK'].values
+        TEMP = forcing_t['TEMP'].values
+        SALT = forcing_t['SALT'].values
+        ICE_FRAC = forcing_t['ICE_FRAC'].values
+        U10 = forcing_t['U10'].values
+        Patm = forcing_t['Patm'].values
+        Xco2atm = forcing_t['XCO2atm'].values
+        h = forcing_t['h'].values
 
         # mol/m^2/yr --> mmol/m^2/s
-        NCP_dic = self.forcing_t['NCP'].values * 1e3 / self.const.spy
+        NCP_dic = forcing_t['NCP'].values * 1e3 / self.const.spy
         NCP_o2 = self.parm.ratio_O22C * NCP_dic
 
         # update carbonate system
@@ -152,25 +159,31 @@ class surface_mixed_layer(box_model):
         stf_co2 = k_co2 * (co2sat - co2aq)     # mmol/m^2/s
         stf_o2 = k_o2 * (o2sat - O2)           # mmol/m^2/s
 
-        self.diag_values['pCO2'] = 1.e6 * co2aq / co2sol   # ppm
-        self.diag_values['stf_CO2'] = stf_co2 * 1e-3 * \
-            self.const.spy  # mmol/m^2/s --> mol/m^2/yr
-
-        self.diag_values['stf_O2'] = stf_o2 * 1e-3 * \
-            self.const.spy  # mmol/m^2/s --> mol/m^2/yr
-        self.diag_values['O2sat'] = o2sat
-
         # physics
         restore_DIC = 0.
         if self.restore_timescale_years != 0.:
             restore_DIC = ((self.restore_DIC_concentration - DIC) /
                            (self.restore_timescale_years * self.const.spy))  # mmol/m^3/s
 
-        self.diag_values['restore_DIC'] = restore_DIC * h * \
-            1e-3 * self.const.spy  # mmol/m^3/s --> mol/m^2/yr
+
+        if return_diags:
+            self.diag_values['pCO2'] = 1.e6 * co2aq / co2sol   # ppm
+            self.diag_values['stf_CO2'] = stf_co2 * 1e-3 * \
+                self.const.spy  # mmol/m^2/s --> mol/m^2/yr
+
+            self.diag_values['stf_O2'] = stf_o2 * 1e-3 * \
+                self.const.spy  # mmol/m^2/s --> mol/m^2/yr
+            self.diag_values['O2sat'] = o2sat
+
+            self.diag_values['restore_DIC'] = restore_DIC * h * \
+                1e-3 * self.const.spy  # mmol/m^3/s --> mol/m^2/yr
+
+            self.diag_values.update({k: da.values for k, da in forcing_t.items()})
+            return self.diag_values
 
         # accumulate tendencies
-        self.dcdt[:, ind['DIC']] = (stf_co2 - NCP_dic) / h + restore_DIC
-        self.dcdt[:, ind['O2']] = (stf_o2 - NCP_o2) / h
+        self.dcdt[ind['DIC']] = (stf_co2 - NCP_dic) / h + restore_DIC
+        self.dcdt[ind['O2']] = (stf_o2 - NCP_o2) / h
 
-        return self.dcdt, self.diag_values
+
+        return self.dcdt

@@ -132,8 +132,8 @@ class o2co2(object):
         eval_time = np.arange(0., t_final_days + dt, dt)
 
         # solve the model
-        soln = solve_ivp(self.compute_tendencies, t_span=[eval_time[0], eval_time[-1]], y0=state_init,
-                         method=method, t_eval=eval_time, rtol=rtol, atol=atol)
+        soln = solve_ivp(self.compute_tendencies, t_span=[eval_time[0], eval_time[-1]],
+                         y0=state_init, method=method, t_eval=eval_time, rtol=rtol, atol=atol)
 
         if not soln.success:
             raise Exception(soln.message)

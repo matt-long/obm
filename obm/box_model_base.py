@@ -1,29 +1,12 @@
 import numpy as np
 import xarray as xr
+
 from scipy.optimize import fsolve
+from scipy.integrate import solve_ivp
 
 import matplotlib.pyplot as plt
 
 from .constants import constants
-
-
-def rk4(dfdt, dt, t, y, kwargs={}):
-    '''
-    4th order Runge-Kutta
-    '''
-    dydt1, diag1 = dfdt(t, y, **kwargs)
-    dydt2, diag2 = dfdt(t + dt / 2., y + dt * dydt1 / 2., **kwargs)
-    dydt3, diag3 = dfdt(t + dt / 2, y + dt * dydt2 / 2., **kwargs)
-    dydt4, diag4 = dfdt(t + dt, y + dt * dydt3, **kwargs)
-
-    y_next_t = y + dt * (dydt1 + 2. * dydt2 + 2. * dydt3 + dydt4) / 6.
-
-    diag_t = diag1
-    for key in diag1.keys():
-        diag_t[key] = (diag1[key] + 2. * diag2[key] + 2. * diag3[key]
-                       + diag4[key]) / 6.
-
-    return y_next_t, diag_t
 
 
 class box_model(object):
@@ -42,7 +25,8 @@ class box_model(object):
         else:
             raise ValueError('unknown forcing time units')
 
-        self.forcing_t = xr.Dataset()
+        self.units_tracer = 'mmol/m$^3$'
+        self.forcing = None
         self.dt = 3600.
 
     def _allocate_state(self):
@@ -52,12 +36,15 @@ class box_model(object):
         if not hasattr(self, 'boxes'):
             raise ValueError('"boxes" attribute is unset')
 
-        nboxes = len(self.boxes)
-        ntracers = len(self.tracers)
+        self.ntracers = len(self.tracers)
+        self.nboxes = len(self.boxes)
 
-        self.ind = {tracer: int(i) for i, tracer in enumerate(self.tracers)}
-        self.state = np.empty((nboxes, ntracers))
-        self.dcdt = np.zeros((nboxes, ntracers))
+        self.ind = {}
+        for i, tracer in enumerate(self.tracers):
+            self.ind[tracer] = np.arange(i * self.nboxes, i * self.nboxes + self.nboxes, 1)
+
+        self.state = np.empty((self.nboxes*self.ntracers))
+        self.dcdt = np.zeros((self.nboxes*self.ntracers))
 
     def reset(self):
         pass
@@ -69,41 +56,11 @@ class box_model(object):
     def compute_tendencies(self, t, state):
         raise NotImplementedError('subclass must implement')
 
-    def interp_forcing(self, t, forcing):
+    def interp_forcing(self, t):
         '''Interpolate forcing dataset at time = t.'''
-        if forcing:
-            self.forcing_t = forcing.interp(
+        if self.forcing is not None:
+            return self.forcing.interp(
                 {'time': self.convert_model_to_user_time * t})
-
-    def _init_output(self, time):
-        user_time = time[1:] * self.convert_model_to_user_time
-        nt_output = len(user_time)
-        nboxes = len(self.boxes)
-
-        time_coord = xr.DataArray(user_time, dims=('time'),
-                                  attrs={'units': self.user_time_units})
-        box_coord = xr.DataArray(self.boxes, dims=('box'))
-
-        output = xr.Dataset(coords={'time': time_coord, 'box': box_coord})
-
-        for tracer in self.tracers:
-            output[tracer] = xr.DataArray(np.empty((nt_output, nboxes)),
-                                          dims=('time', 'box'),
-                                          attrs={'units': 'mmol/m$^3$',
-                                                 'long_name': tracer},
-                                          coords={'time': time_coord, 'box': box_coord})
-
-        for var, da in self.forcing_t.data_vars.items():
-            attrs = da.attrs
-            output[var] = xr.DataArray(np.empty(nt_output),
-                                       dims=('time'),
-                                       coords={'time': time_coord},
-                                       attrs=attrs)
-
-        for key, val in self.diag_definitions.items():
-            output[key] = xr.DataArray(np.empty(nt_output), **val)
-
-        return output
 
     def _init(self, state_init, init_option='input', init_file=None, **kwargs):
         """Initialize the model."""
@@ -135,7 +92,7 @@ class box_model(object):
         dstate_out = np.zeros((len(self.tracers)))
 
         def wrap_model(state_in):
-            out = self.run(time_stop=kwargs['time_stop'],
+            out = self.run(t_final_days=kwargs['t_final_days'],
                            forcing=kwargs['forcing'],
                            state_init=state_in,
                            init_option='input')
@@ -144,20 +101,27 @@ class box_model(object):
 
         return fsolve(wrap_model, state_init, xtol=1e-5, maxfev=100)
 
-    def run(self, time_stop, forcing=xr.Dataset(), state_init=None,
-            init_option='input', init_file=None):
+
+    def plot(self, out):
+        for tracer in self.tracers:
+            plt.figure()
+            out[tracer].plot()
+
+    def run(self, t_final_days, state_init, dt=1., forcing=None,
+            init_option='input', init_file=None, method='Radau',
+            rtol=1e-3, atol=1e-6):
         """Integrate the model in time.
 
         Parameters
         ----------
-        time_stop : numeric
-           Final time value.
-
-        forcing : xarray.Dataset
-           Forcing data defined with `time` coordinate.
+        t_final_days : numeric
+           Final time value in days.
 
         state_init : numpy.array
            Initial state with dimensions [nboxes, ntracers]
+
+        forcing : xarray.Dataset, optional
+           Forcing data defined with `time` coordinate.
 
         init_option : string, optional [default='input']
             Initialization method:
@@ -175,56 +139,56 @@ class box_model(object):
         out : xarray.Dataset
            Model solution.
         """
-
-        # pointers for local variable
-        ind = self.ind
-        dt = self.dt
-        tend_func = self.compute_tendencies
+        nt = np.int(t_final_days / dt)
 
         # time axis
-        time = np.arange(
-            0.,
-            time_stop /
-            self.convert_model_to_user_time +
-            dt,
-            dt)
-        nt = len(time)
+        eval_time = np.arange(0., t_final_days + dt, dt) / self.convert_model_to_user_time
 
-        # initialize
-        self.interp_forcing(time[0], forcing)
+        # set forcing
+        if forcing is not None:
+            self.forcing = forcing
+
         self._init(state_init=state_init,
                    init_option=init_option,
                    init_file=init_file,
-                   time_stop=time_stop,
+                   t_final_days=t_final_days,
                    forcing=forcing)
 
         self._init_diags()
-        output = self._init_output(time)
 
-        # begin timestepping
-        for l in range(1, nt):
+        # solve the model
+        soln = solve_ivp(self.compute_tendencies, t_span=[eval_time[0], eval_time[-1]],
+                         y0=state_init, method=method, t_eval=eval_time,
+                         rtol=rtol, atol=atol)
 
-            # -- interpolate forcing
-            self.interp_forcing(time[l], forcing)
+        if not soln.success:
+            raise Exception(soln.message)
+        soln_state = soln.y.T
+        soln_time = soln.t * self.convert_model_to_user_time
 
-            # -- integrated
-            self.state, diag_t = rk4(tend_func, dt, time[l], self.state)
 
-            self.reset()
+        time_coord = xr.DataArray(soln_time, dims=('time'),
+                                  attrs={'units': 'days'})
+        box_coord = xr.DataArray(self.boxes, dims=('box'))
 
-            # -- save output
-            for tracer in self.tracers:
-                output[tracer].data[l - 1, :] = self.state[:, ind[tracer]]
+        output = xr.Dataset(coords={'time': time_coord, 'box': box_coord})
 
-            for var in self.forcing_t:
-                output[var].data[l - 1] = self.forcing_t[var]
+        for i, tracer in enumerate(self.tracers):
+            ind = np.arange(i * self.nboxes, i * self.nboxes + self.nboxes, 1)
+            output[tracer] = xr.DataArray(soln_state[:, ind],
+                                          dims=('time', 'box'),
+                                          attrs={'units': self.units_tracer,
+                                                 'long_name': tracer},
+                                          coords={'time': time_coord, 'box': box_coord})
 
+        # get diagnostic quantities by re-calling `compute_tendencies`
+        for key, val in self.diag_definitions.items():
+            output[key] = xr.DataArray(np.empty(nt+1), **val)
+
+        for l in range(len(soln_time)):
+            t = soln_time[l] / self.convert_model_to_user_time
+            diag_t = self.compute_tendencies(t, soln_state[l, :], return_diags=True)
             for key, val in diag_t.items():
-                output[key].data[l - 1] = val
+                output[key].data[l] = np.array(val)
 
         return output
-
-    def plot(self, out):
-        for tracer in self.tracers:
-            plt.figure()
-            out[tracer].plot()
