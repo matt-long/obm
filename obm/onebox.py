@@ -29,7 +29,7 @@ class parameters(object):
 class surface_mixed_layer(box_model):
     '''A box model.'''
 
-    def __init__(self, time_step=86400., **kwargs):
+    def __init__(self, **kwargs):
         '''Initialize model.'''
 
         super(surface_mixed_layer, self).__init__(**kwargs)
@@ -37,8 +37,8 @@ class surface_mixed_layer(box_model):
         self.restore_DIC_concentration = 2200.
 
         self.parm = parameters(**kwargs)
+        self.cyclic_annual_forcing = False
 
-        self.dt = time_step
         self.boxes = ['surface']
         self.tracers = ['DIC', 'O2']
         self._allocate_state()
@@ -165,14 +165,14 @@ class surface_mixed_layer(box_model):
             restore_DIC = ((self.restore_DIC_concentration - DIC) /
                            (self.restore_timescale_years * self.const.spy))  # mmol/m^3/s
 
-
         if return_diags:
-            self.diag_values['pCO2'] = 1.e6 * co2aq / co2sol   # ppm
-            self.diag_values['stf_CO2'] = stf_co2 * 1e-3 * \
-                self.const.spy  # mmol/m^2/s --> mol/m^2/yr
+            # ppm
+            self.diag_values['pCO2'] = 1.e6 * co2aq / co2sol
 
-            self.diag_values['stf_O2'] = stf_o2 * 1e-3 * \
-                self.const.spy  # mmol/m^2/s --> mol/m^2/yr
+            # mmol/m^2/s --> mol/m^2/yr
+            self.diag_values['stf_CO2'] = stf_co2 * 1e-3 * self.const.spy
+            self.diag_values['stf_O2'] = stf_o2 * 1e-3 * self.const.spy
+
             self.diag_values['O2sat'] = o2sat
 
             self.diag_values['restore_DIC'] = restore_DIC * h * \

@@ -25,6 +25,7 @@ class box_model(object):
         else:
             raise ValueError('unknown forcing time units')
 
+        self.cyclic_annual_forcing = False
         self.units_tracer = 'mmol/m$^3$'
         self.forcing = None
         self.dt = 3600.
@@ -56,13 +57,20 @@ class box_model(object):
     def compute_tendencies(self, t, state):
         raise NotImplementedError('subclass must implement')
 
+    def _compute_forcing_time(self, t):
+        forcing_time = t
+        if self.cyclic_annual_forcing:
+            forcing_time = forcing_time - 365. * np.floor(forcing_time / 365.)
+
+        return forcing_time * self.convert_model_to_user_time
+
     def interp_forcing(self, t):
         '''Interpolate forcing dataset at time = t.'''
-        if self.forcing is not None:
-            return self.forcing.interp(
-                {'time': self.convert_model_to_user_time * t})
 
-    def _init(self, state_init, init_option='input', init_file=None, **kwargs):
+        if self.forcing is not None:
+            return self.forcing.interp({'time': self._compute_forcing_time(t)})
+
+    def _init(self, state_init, init_option, init_file, **kwargs):
         """Initialize the model."""
 
         if init_option == 'input':
@@ -89,17 +97,40 @@ class box_model(object):
 
     def _fsolve_equilibrium(self, state_init, **kwargs):
         """Find cyclostationary solution."""
-        dstate_out = np.zeros((len(self.tracers)))
+        dstate_out = np.zeros((self.ntracers))
+
+        # precondition
+        for i in range(3):
+            state_out = self.run(t_final_days=kwargs['t_final_days'],
+                                 state_init=state_init,
+                                 init_option='input',
+                                 forcing=kwargs['forcing'],
+                                 method=kwargs['method'],
+                                 dt=kwargs['dt'],
+                                 rtol=kwargs['rtol'],
+                                 atol=kwargs['atol'],
+                                 return_only_state=True)
+            state_init = state_out[-1, :]
 
         def wrap_model(state_in):
-            out = self.run(t_final_days=kwargs['t_final_days'],
-                           forcing=kwargs['forcing'],
-                           state_init=state_in,
-                           init_option='input')
-            dstate_out = np.sum((self.state - state_in)**2, axis=0)
+            state_out = self.run(t_final_days=kwargs['t_final_days'],
+                                 state_init=state_init,
+                                 init_option='input',
+                                 forcing=kwargs['forcing'],
+                                 method=kwargs['method'],
+                                 dt=kwargs['dt'],
+                                 rtol=kwargs['rtol'],
+                                 atol=kwargs['atol'],
+                                 return_only_state=True)
+
+            for i, tracer in enumerate(self.tracers):
+                state_out_tracer = state_out[-1, self.ind[tracer]]
+                state_in_tracer = state_in[self.ind[tracer]]
+                dstate_out[i] = np.sum((state_out_tracer - state_in_tracer)**2)
+
             return dstate_out
 
-        return fsolve(wrap_model, state_init, xtol=1e-5, maxfev=100)
+        return fsolve(wrap_model, state_init, xtol=1e-7, maxfev=2000)
 
 
     def plot(self, out):
@@ -107,9 +138,9 @@ class box_model(object):
             plt.figure()
             out[tracer].plot()
 
-    def run(self, t_final_days, state_init, dt=1., forcing=None,
-            init_option='input', init_file=None, method='Radau',
-            rtol=1e-3, atol=1e-6):
+    def run(self, t_final_days, state_init, init_option='input', init_file=None,
+            dt=1., forcing=None, method='Radau',
+            rtol=1e-3, atol=1e-3, return_only_state=False):
         """Integrate the model in time.
 
         Parameters
@@ -148,24 +179,32 @@ class box_model(object):
         if forcing is not None:
             self.forcing = forcing
 
-        self._init(state_init=state_init,
-                   init_option=init_option,
-                   init_file=init_file,
-                   t_final_days=t_final_days,
-                   forcing=forcing)
+        run_kwargs = dict(t_final_days=t_final_days, dt=dt, forcing=forcing,
+                          method=method, rtol=rtol, atol=atol)
+
+        state_init = self._init(state_init=state_init,
+                                init_option=init_option,
+                                init_file=init_file,
+                                **run_kwargs)
 
         self._init_diags()
 
         # solve the model
-        soln = solve_ivp(self.compute_tendencies, t_span=[eval_time[0], eval_time[-1]],
-                         y0=state_init, method=method, t_eval=eval_time,
+        soln = solve_ivp(self.compute_tendencies,
+                         t_span=[eval_time[0], eval_time[-1]],
+                         t_eval=eval_time,
+                         y0=self.state,
+                         method=method,
                          rtol=rtol, atol=atol)
 
         if not soln.success:
             raise Exception(soln.message)
+
         soln_state = soln.y.T
         soln_time = soln.t * self.convert_model_to_user_time
 
+        if return_only_state:
+            return soln_state
 
         time_coord = xr.DataArray(soln_time, dims=('time'),
                                   attrs={'units': 'days'})
@@ -174,8 +213,7 @@ class box_model(object):
         output = xr.Dataset(coords={'time': time_coord, 'box': box_coord})
 
         for i, tracer in enumerate(self.tracers):
-            ind = np.arange(i * self.nboxes, i * self.nboxes + self.nboxes, 1)
-            output[tracer] = xr.DataArray(soln_state[:, ind],
+            output[tracer] = xr.DataArray(soln_state[:, self.ind[tracer]],
                                           dims=('time', 'box'),
                                           attrs={'units': self.units_tracer,
                                                  'long_name': tracer},
