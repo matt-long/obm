@@ -100,7 +100,7 @@ class box_model(object):
         dstate_out = np.zeros((self.ntracers))
 
         # precondition
-        for i in range(3):
+        for i in range(10):
             state_out = self.run(t_final_days=kwargs['t_final_days'],
                                  state_init=state_init,
                                  init_option='input',
@@ -206,7 +206,7 @@ class box_model(object):
         if return_only_state:
             return soln_state
 
-        time_coord = xr.DataArray(soln_time, dims=('time'),
+        time_coord = xr.DataArray(soln_time[1:], dims=('time'),
                                   attrs={'units': 'days'})
         box_coord = xr.DataArray(self.boxes, dims=('box'))
 
