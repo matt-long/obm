@@ -227,6 +227,6 @@ class box_model(object):
             t = soln_time[l] / self.convert_model_to_user_time
             diag_t = self.compute_tendencies(t, soln_state[l, :], return_diags=True)
             for key, val in diag_t.items():
-                output[key].data[l] = np.array(val)
+                output[key].data[l-1] = np.array(val)
 
         return output
