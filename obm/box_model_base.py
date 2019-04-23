@@ -213,7 +213,7 @@ class box_model(object):
         output = xr.Dataset(coords={'time': time_coord, 'box': box_coord})
 
         for i, tracer in enumerate(self.tracers):
-            output[tracer] = xr.DataArray(soln_state[:, self.ind[tracer]],
+            output[tracer] = xr.DataArray(soln_state[1:, self.ind[tracer]],
                                           dims=('time', 'box'),
                                           attrs={'units': self.units_tracer,
                                                  'long_name': tracer},
@@ -221,9 +221,9 @@ class box_model(object):
 
         # get diagnostic quantities by re-calling `compute_tendencies`
         for key, val in self.diag_definitions.items():
-            output[key] = xr.DataArray(np.empty(nt+1), **val)
+            output[key] = xr.DataArray(np.empty(nt), **val)
 
-        for l in range(len(soln_time)):
+        for l in range(1, len(soln_time)):
             t = soln_time[l] / self.convert_model_to_user_time
             diag_t = self.compute_tendencies(t, soln_state[l, :], return_diags=True)
             for key, val in diag_t.items():
